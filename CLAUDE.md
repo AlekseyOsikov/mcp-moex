@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-MCP-сервер над публичным API Московской биржи (ISS) на Python: три инструмента только для чтения (`search_securities`, `get_current_price`, `get_price_history`) для ИИ-агента-консультанта по российскому рынку. Агент живёт в другом проекте и подключается к серверу через MCP SDK. Документация для пользователя в `README.md`, поведение инструментов в `openspec/changes/add-moex-mcp-server/specs/`.
+MCP-сервер над публичным API Московской биржи (ISS) на Python: три инструмента только для чтения (`search_securities`, `get_current_price`, `get_price_history`) для ИИ-агента-консультанта по российскому рынку. Агент живёт в другом проекте и подключается к серверу через MCP SDK. Документация для пользователя в `README.md`, поведение инструментов в `openspec/specs/` (четыре возможности: `moex-security-search`, `moex-current-price`, `moex-price-history`, `mcp-server-runtime`).
 
 ## Команды
 
@@ -30,7 +30,7 @@ uv run python -m tests.record_fixtures         # записать заранее
 - **`models.py`**: входные параметры как `Annotated`-псевдонимы с `Field(description=...)` (из них MCP SDK строит JSON-схему для агента) и выходные модели. `PriceResult` через `model_serializer` убирает поля облигаций у не-облигаций, но оставляет `yield_percent: null` у облигаций.
 - **`errors.py`**: доменные ошибки, текст каждой рассчитан на LLM (что случилось и что делать).
 
-Изменения поведения инструментов начинаются со спецификации: проект ведётся по OpenSpec (`/opsx:explore`, `/opsx:propose`, `/opsx:apply`, `/opsx:archive`), артефакты лежат в `openspec/changes/`. Расхождение кода и спецификации нужно править в обоих местах.
+Изменения поведения инструментов начинаются со спецификации: проект ведётся по OpenSpec (`/opsx:explore`, `/opsx:propose`, `/opsx:apply`, `/opsx:archive`), действующие спецификации лежат в `openspec/specs/`, активные изменения в `openspec/changes/`, завершённые в `openspec/changes/archive/` (там же дизайн и решения первой реализации, `2026-09-25-add-moex-mcp-server`). Расхождение кода и спецификации нужно править в обоих местах.
 
 ## Неочевидное
 

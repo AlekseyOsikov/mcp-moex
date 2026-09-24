@@ -102,4 +102,4 @@ uv run pytest                           # тесты без сети, на за�
 ## Разработка
 
 - Тесты работают только на записанных ответах ISS в `tests/fixtures/`; сетевые соединения в них запрещены. Записать недостающие: `RECORD_FIXTURES=1 uv run pytest` или `uv run python -m tests.record_fixtures`.
-- Спецификации и дизайн лежат в `openspec/changes/add-moex-mcp-server/`.
+- Спецификации поведения лежат в `openspec/specs/`; дизайн и решения первой реализации в `openspec/changes/archive/2026-09-25-add-moex-mcp-server/`.
