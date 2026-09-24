@@ -1,0 +1,31 @@
+[project]
+name = "mcp-moex"
+version = "0.1.0"
+description = "MCP-сервер для данных Московской биржи (ISS): поиск бумаг, текущая цена, история цен"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "mcp>=2.2,<3",
+    "httpx>=0.28",
+    "pydantic>=2.12",
+]
+
+[project.scripts]
+mcp-moex = "mcp_moex.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcp_moex"]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

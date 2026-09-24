@@ -1,0 +1,1 @@
+{"securities":{"columns":["secid","shortname","name","isin","group","primary_boardid"],"data":[["FIXSBER","Фиксинг МосБиржи SBER","Фиксинг МосБиржи обыкновенных акций ПАО Сбербанк",null,"stock_index","INPF"],["FIXSBERP","Фиксинг МосБиржи SBERP","Фиксинг МосБиржи привилегированных акций ПАО Сбербанк",null,"stock_index","INPF"]]}}

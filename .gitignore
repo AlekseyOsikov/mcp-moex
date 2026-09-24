@@ -1,0 +1,24 @@
+# Окружение и сборка
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+
+# Кэши и отчёты инструментов
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Секреты и локальные настройки (проекту ключи не нужны, но на будущее)
+.env
+.env.*
+.claude/settings.local.json
+
+# IDE и ОС
+.idea/
+.vscode/
+.DS_Store
