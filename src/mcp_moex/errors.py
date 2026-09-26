@@ -67,3 +67,27 @@ class RangeTooLarge(MoexError):
 
 class InvalidArguments(MoexError):
     """Аргументы инструмента неверны по смыслу (например, начало периода позже конца)."""
+
+
+class WatchNotSet(MoexError):
+    """Для чата не задан опрос цен (режим расписания)."""
+
+    def __init__(self, chat_id: int) -> None:
+        self.chat_id = chat_id
+        super().__init__(
+            f"Для чата {chat_id} опрос не задан. Задайте его инструментом watch_set "
+            "(тикеры, poll_interval и report_interval) и повторите запрос."
+        )
+
+
+class WatchStoreUnavailable(MoexError):
+    """Файл хранилища расписания не открывается или повреждён."""
+
+    def __init__(self, detail: str = "") -> None:
+        message = (
+            "Хранилище расписания недоступно: файл, указанный в --watch-db, нельзя открыть как базу данных. "
+            "Проверьте путь и права доступа к файлу, при необходимости укажите другой путь и перезапустите сервер."
+        )
+        if detail:
+            message = f"{message} Подробности: {detail}"
+        super().__init__(message)

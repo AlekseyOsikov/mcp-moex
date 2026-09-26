@@ -3,8 +3,10 @@
 import argparse
 import logging
 import sys
-from collections.abc import Awaitable, Sequence
+import time
+from collections.abc import Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, TypeVar
 
 from mcp.server.mcpserver import MCPServer
@@ -14,18 +16,32 @@ from mcp.types import ToolAnnotations
 from .errors import MoexError
 from .iss import IssClient
 from .models import (
+    AckResult,
+    ChatIdParam,
     DateFromParam,
     DateTillParam,
     HistoryResult,
     IntervalParam,
     LimitParam,
+    PollIntervalParam,
     PriceResult,
     QueryParam,
+    Report,
+    ReportIdsParam,
+    ReportIntervalParam,
+    RunDueResult,
     SearchAssetTypeParam,
     SearchResult,
     SecidParam,
+    WatchSecidsParam,
+    WatchSetResult,
+    WatchStatusResult,
+    WatchStopResult,
 )
 from .tools import history, price, search
+from .tools import watch as watch_tools
+from .watch.service import WatchService
+from .watch.store import WatchStore
 
 logger = logging.getLogger(__name__)
 
@@ -39,8 +55,19 @@ INSTRUCTIONS = (
     "get_price_history для истории. Котировки акций, облигаций и фондов задержаны на 15 минут."
 )
 
+WATCH_INSTRUCTIONS = (
+    " Включён режим расписания: инструменты watch_* служебные, они для клиента-планировщика, а не для ответов "
+    "пользователю."
+)
+
 READ_ONLY = ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=True)
-"""Все инструменты только читают публичные данные биржи."""
+"""Инструменты чтения только читают публичные данные биржи."""
+
+# Инструменты расписания НЕ помечены read_only_hint: клиент отдаёт модели только инструменты с этим признаком,
+# а эти принимают chat_id извне и изменяют хранилище (даже watch_status и watch_get_report не для модели).
+WATCH_MUTATING = ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=True)
+WATCH_LOCAL = ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent_hint=True, open_world_hint=False)
+WATCH_LOCAL_READ = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=True, open_world_hint=False)
 
 _T = TypeVar("_T")
 
@@ -53,8 +80,16 @@ async def _guard(call: Awaitable[_T]) -> _T:
         raise ToolError(str(error)) from error
 
 
-def create_server(iss: IssClient | None = None) -> MCPServer:
-    """Собирает сервер. Без аргумента использует настоящий клиент ISS и закрывает его при остановке."""
+def create_server(
+    iss: IssClient | None = None,
+    watch_db: str | Path | None = None,
+    clock: Callable[[], float] | None = None,
+) -> MCPServer:
+    """Собирает сервер. Без `iss` использует настоящий клиент ISS и закрывает его при остановке.
+
+    С `watch_db` (путь к файлу SQLite) дополнительно публикует шесть инструментов расписания; без него сервер
+    ровно такой, как раньше: три инструмента чтения и никаких файлов. `clock` (секунды Unix) нужен тестам.
+    """
     client = iss if iss is not None else IssClient()
     owns_client = iss is None
 
@@ -66,7 +101,8 @@ def create_server(iss: IssClient | None = None) -> MCPServer:
             if owns_client:
                 await client.aclose()
 
-    server = MCPServer(SERVER_NAME, instructions=INSTRUCTIONS, lifespan=lifespan)
+    instructions = INSTRUCTIONS + (WATCH_INSTRUCTIONS if watch_db is not None else "")
+    server = MCPServer(SERVER_NAME, instructions=instructions, lifespan=lifespan)
 
     @server.tool(name="search_securities", description=search.DESCRIPTION, annotations=READ_ONLY)
     async def search_securities(
@@ -89,7 +125,41 @@ def create_server(iss: IssClient | None = None) -> MCPServer:
     ) -> HistoryResult:
         return await _guard(history.get_price_history(client, secid, date_from, date_till, interval))
 
+    if watch_db is not None:
+        _register_watch_tools(server, WatchService(WatchStore(watch_db), client, clock or time.time))
+
     return server
+
+
+def _register_watch_tools(server: MCPServer, service: WatchService) -> None:
+    @server.tool(name="watch_set", description=watch_tools.SET_DESCRIPTION, annotations=WATCH_MUTATING)
+    async def watch_set(
+        chat_id: ChatIdParam,
+        secids: WatchSecidsParam,
+        poll_interval: PollIntervalParam,
+        report_interval: ReportIntervalParam,
+    ) -> WatchSetResult:
+        return await _guard(watch_tools.watch_set(service, chat_id, secids, poll_interval, report_interval))
+
+    @server.tool(name="watch_stop", description=watch_tools.STOP_DESCRIPTION, annotations=WATCH_LOCAL)
+    async def watch_stop(chat_id: ChatIdParam) -> WatchStopResult:
+        return await _guard(watch_tools.watch_stop(service, chat_id))
+
+    @server.tool(name="watch_status", description=watch_tools.STATUS_DESCRIPTION, annotations=WATCH_LOCAL_READ)
+    async def watch_status(chat_id: ChatIdParam) -> WatchStatusResult:
+        return await _guard(watch_tools.watch_status(service, chat_id))
+
+    @server.tool(name="watch_get_report", description=watch_tools.GET_REPORT_DESCRIPTION, annotations=WATCH_LOCAL_READ)
+    async def watch_get_report(chat_id: ChatIdParam) -> Report:
+        return await _guard(watch_tools.watch_get_report(service, chat_id))
+
+    @server.tool(name="watch_run_due", description=watch_tools.RUN_DUE_DESCRIPTION, annotations=WATCH_MUTATING)
+    async def watch_run_due() -> RunDueResult:
+        return await _guard(watch_tools.watch_run_due(service))
+
+    @server.tool(name="watch_ack", description=watch_tools.ACK_DESCRIPTION, annotations=WATCH_LOCAL)
+    async def watch_ack(report_ids: ReportIdsParam) -> AckResult:
+        return await _guard(watch_tools.watch_ack(service, report_ids))
 
 
 def configure_logging() -> None:
@@ -120,13 +190,23 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_HTTP_PORT,
         help=f"порт для streamable-http (по умолчанию {DEFAULT_HTTP_PORT}); адрес всегда {LOOPBACK_HOST}",
     )
+    parser.add_argument(
+        "--watch-db",
+        type=Path,
+        default=None,
+        metavar="ПУТЬ",
+        help=(
+            "включить режим расписания (инструменты watch_* для клиента-планировщика): путь к файлу SQLite "
+            "с замерами и сводками, создаётся при первом использовании; без флага файлов на диске нет"
+        ),
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     configure_logging()
-    server = create_server()
+    server = create_server(watch_db=args.watch_db)
     run_kwargs: dict[str, Any] = {}
     if args.transport == "streamable-http":
         run_kwargs = {"host": LOOPBACK_HOST, "port": args.port}

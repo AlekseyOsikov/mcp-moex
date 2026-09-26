@@ -194,3 +194,132 @@ class HistoryResult(BaseModel):
     candles_returned: int = Field(description="Сколько свечей возвращено в candles.")
     candles_truncated: bool = Field(description="true: свечей больше, чем возвращено; сводка учитывает все.")
     message: str | None = Field(default=None, description="Пояснение, например, что за период нет торгов.")
+
+
+# --- Режим расписания (moex-price-watch) --------------------------------------------------------
+# Инструменты служебные: их вызывает клиент-планировщик, а не модель.
+
+ChatIdParam = Annotated[
+    int,
+    Field(description="Идентификатор чата (целое число), в котором ведётся опрос. Задаёт клиент-планировщик."),
+]
+
+WatchSecidsParam = Annotated[
+    list[SecidParam],
+    Field(
+        description=(
+            "Тикеры бумаг для опроса, от 1 до 10 (регистр не важен, повторы убираются). "
+            "Если известно только название или ISIN, сначала найдите тикер через search_securities."
+        )
+    ),
+]
+
+PollIntervalParam = Annotated[
+    str,
+    Field(
+        description=(
+            "Как часто опрашивать цены: целое число и единица m (минуты), h (часы) или d (сутки), "
+            "например 15m, 1h, 1d. От 5m до 1d. Время суток не поддерживается."
+        ),
+        examples=["15m"],
+    ),
+]
+
+ReportIntervalParam = Annotated[
+    str,
+    Field(
+        description=(
+            "Как часто формировать сводку: тот же формат, что у poll_interval (15m, 1h, 1d). "
+            "Не меньше poll_interval и не больше 7d."
+        ),
+        examples=["1h"],
+    ),
+]
+
+ReportIdsParam = Annotated[
+    list[int],
+    Field(description="Идентификаторы сводок (report_id из watch_run_due), которые успешно доставлены."),
+]
+
+
+class FirstSample(BaseModel):
+    secid: str = Field(description="Тикер в каноническом написании.")
+    price: float = Field(description="Цена первого замера в единицах price_unit.")
+    price_unit: str = Field(description="Единица цены: RUB (или код валюты), percent_of_face, points.")
+    quote_at: str = Field(description="Время котировки по данным биржи, ISO 8601, +03:00.")
+
+
+class WatchSetResult(BaseModel):
+    chat_id: int = Field(description="Идентификатор чата.")
+    secids: list[str] = Field(description="Канонические тикеры опроса без повторов, в порядке ввода.")
+    poll_interval: str = Field(description="Период опроса в принятом виде (без пробелов, строчными).")
+    report_interval: str = Field(description="Период сводки в принятом виде.")
+    replaced: bool = Field(description="true: для чата уже был опрос, он заменён новым.")
+    next_poll_at: str = Field(description="Момент следующего опроса, ISO 8601, +03:00.")
+    next_report_at: str = Field(description="Момент следующей сводки, ISO 8601, +03:00.")
+    first_samples: list[FirstSample] = Field(description="Первые замеры, сделанные при постановке, по тикерам.")
+
+
+class WatchStopResult(BaseModel):
+    chat_id: int = Field(description="Идентификатор чата.")
+    stopped: bool = Field(description="true: опрос был и остановлен; false: опроса не было.")
+
+
+class WatchStatusResult(BaseModel):
+    active: bool = Field(description="true: для чата задан опрос. Если false, остальных полей нет.")
+    chat_id: int | None = Field(default=None, description="Идентификатор чата.")
+    secids: list[str] | None = Field(default=None, description="Тикеры опроса.")
+    poll_interval: str | None = Field(default=None, description="Период опроса.")
+    report_interval: str | None = Field(default=None, description="Период сводки.")
+    started_at: str | None = Field(default=None, description="Когда задан опрос, ISO 8601, +03:00.")
+    next_poll_at: str | None = Field(default=None, description="Следующий опрос, ISO 8601, +03:00.")
+    next_report_at: str | None = Field(default=None, description="Следующая сводка, ISO 8601, +03:00.")
+    samples_in_period: int | None = Field(default=None, description="Замеров в текущем периоде сводки.")
+    pending_reports: int | None = Field(default=None, description="Сводок чата, ещё не подтверждённых через watch_ack.")
+
+    @model_serializer(mode="wrap")
+    def _only_active_flag_when_inactive(self, handler: Any) -> dict[str, Any]:
+        data = handler(self)
+        return data if self.active else {"active": False}
+
+
+class TickerAggregate(BaseModel):
+    secid: str = Field(description="Тикер.")
+    samples: int = Field(description="Число удавшихся замеров за период.")
+    failed_samples: int = Field(description="Число неудавшихся замеров (биржа не отдала котировку).")
+    first_price: float | None = Field(description="Цена первого замера периода; null, если замеров нет.")
+    last_price: float | None = Field(description="Цена последнего замера периода; null, если замеров нет.")
+    change_percent: float | None = Field(description="Изменение last_price к first_price в %, 2 знака; null без замеров.")
+    min_price: float | None = Field(description="Наименьшая цена замеров периода; null без замеров.")
+    max_price: float | None = Field(description="Наибольшая цена замеров периода; null без замеров.")
+    price_unit: str | None = Field(description="Единица цены; null без замеров.")
+    last_quote_at: str | None = Field(description="Время последней котировки по данным биржи, ISO 8601, +03:00.")
+
+
+class Report(BaseModel):
+    report_id: int | None = Field(description="Идентификатор для watch_ack; null у сводки по запросу (watch_get_report).")
+    chat_id: int = Field(description="Идентификатор чата.")
+    period_start: str = Field(description="Начало периода сводки, ISO 8601, +03:00.")
+    period_end: str = Field(description="Конец периода сводки, ISO 8601, +03:00.")
+    text: str = Field(description="Готовый русский текст сводки: отправляйте пользователю как есть.")
+    tickers: list[TickerAggregate] = Field(description="Агрегаты по тикерам опроса.")
+
+
+class PolledCounts(BaseModel):
+    chats: int = Field(description="Сколько чатов опрошено за вызов.")
+    tickers: int = Field(description="Сколько уникальных тикеров опрошено за вызов.")
+    failed: int = Field(description="Сколько из них не удалось опросить.")
+
+
+class RunDueResult(BaseModel):
+    now: str = Field(description="Момент вызова, ISO 8601, +03:00.")
+    next_due_at: str | None = Field(
+        description="Ближайший будущий срок опроса или сводки среди всех чатов; null, если опросов нет."
+    )
+    polled: PolledCounts = Field(description="Что опрошено за этот вызов.")
+    reports: list[Report] = Field(description="Сводки к отправке (не подтверждённые через watch_ack), старые первыми.")
+    has_more: bool = Field(description="true: неподтверждённых сводок больше 100; вызовите watch_run_due ещё раз.")
+
+
+class AckResult(BaseModel):
+    acknowledged: int = Field(description="Сколько сводок отмечено доставленными (повторные и неизвестные не считаются).")

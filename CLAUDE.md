@@ -2,16 +2,18 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-MCP-сервер над публичным API Московской биржи (ISS) на Python: три инструмента только для чтения (`search_securities`, `get_current_price`, `get_price_history`) для ИИ-агента-консультанта по российскому рынку. Агент живёт в другом проекте и подключается к серверу через MCP SDK. Документация для пользователя в `README.md`, поведение инструментов в `openspec/specs/` (четыре возможности: `moex-security-search`, `moex-current-price`, `moex-price-history`, `mcp-server-runtime`).
+MCP-сервер над публичным API Московской биржи (ISS) на Python: по умолчанию три инструмента только для чтения (`search_securities`, `get_current_price`, `get_price_history`) для ИИ-агента-консультанта по российскому рынку; с флагом `--watch-db` ещё шесть служебных инструментов расписания (`watch_*`) для клиента-планировщика (бота). Агент и бот живут в других проектах и подключаются к серверу через MCP SDK. Документация для пользователя в `README.md`, поведение инструментов в `openspec/specs/` (возможности: `moex-security-search`, `moex-current-price`, `moex-price-history`, `mcp-server-runtime`; `moex-price-watch` после архивации изменения `add-price-watch-scheduler`).
 
 ## Команды
 
 ```bash
 uv sync                                        # окружение (Python 3.12)
-uv run pytest                                  # все тесты, без сети (~6 с)
+uv run pytest                                  # все тесты, без сети (~9 с)
 uv run pytest tests/test_price.py::test_bond_rub_price_has_no_float_noise   # один тест
 uv run python scripts/smoke_client.py          # сквозная проверка на живом ISS: код 0 при успехе
-uv run mcp-moex                                # сервер по stdio (по умолчанию)
+uv run python scripts/smoke_watch.py           # то же для режима расписания (временная БД, живой ISS)
+uv run mcp-moex                                # сервер по stdio (по умолчанию), три инструмента чтения
+uv run mcp-moex --watch-db data/watch.db       # + режим расписания, файл SQLite создаётся при первом обращении
 uv run mcp-moex --transport streamable-http --port 8000   # HTTP, только 127.0.0.1
 RECORD_FIXTURES=1 uv run pytest                # дописать недостающие фикстуры ISS с живого сервера
 uv run python -m tests.record_fixtures         # записать заранее заданный список запросов
@@ -23,17 +25,21 @@ uv run python -m tests.record_fixtures         # записать заранее
 
 Поток вызова: инструмент (`server.py`) -> `tools/*.py` -> `resolver.resolve(secid)` -> `IssClient.get_tables(...)` -> модель Pydantic -> `structuredContent` и текстовый JSON.
 
-- **`server.py`**: `create_server(iss=None)` собирает `MCPServer` и замыкает инструменты на один `IssClient`; тесты подставляют клиент с фикстурами. `_guard` превращает `MoexError` в `ToolError(текст)`: агент видит наш русский текст, а любое другое исключение SDK скрывает без деталей. `main()` выбирает транспорт; хост HTTP жёстко `127.0.0.1`.
+- **`server.py`**: `create_server(iss=None, watch_db=None, clock=None)` собирает `MCPServer` и замыкает инструменты на один `IssClient` (инструменты расписания регистрируются только при `watch_db`); тесты подставляют клиент с фикстурами. `_guard` превращает `MoexError` в `ToolError(текст)`: агент видит наш русский текст, а любое другое исключение SDK скрывает без деталей. `main()` выбирает транспорт; хост HTTP жёстко `127.0.0.1`.
 - **`tools/*.py`**: чистые async-функции `(iss, ...) -> модель`, без знания про MCP. Рядом лежит `DESCRIPTION` инструмента; это часть контракта для LLM, тесты проверяют его содержимое (задержка, единицы, предупреждение о сплитах, отсылка к `search_securities`).
 - **`resolver.py`**: по карточке бумаги `/securities/{secid}.json` находит основную площадку (`is_primary = 1`, предпочтительно движок `stock`) и класс актива по группе ISS (`GROUP_TO_ASSET_TYPE`). Агент и инструменты не знают про движки, рынки и площадки. Расчётные показатели (iNAV, фиксинги) классом `index` не считаются.
 - **`iss.py`**: единственная точка сети. Разбор `columns`/`data` в словари, повторы на сетевых сбоях, 5xx и 429, кэш в памяти по `ttl` (котировки 10 с, карточки бумаг 6 ч, поиск 5 мин). Всё остальное чистое, поэтому тесты подменяют только транспорт `httpx`.
 - **`models.py`**: входные параметры как `Annotated`-псевдонимы с `Field(description=...)` (из них MCP SDK строит JSON-схему для агента) и выходные модели. `PriceResult` через `model_serializer` убирает поля облигаций у не-облигаций, но оставляет `yield_percent: null` у облигаций.
 - **`errors.py`**: доменные ошибки, текст каждой рассчитан на LLM (что случилось и что делать).
+- **`watch/` и `tools/watch.py`** (режим расписания, только с `--watch-db`; см. `server.py`): `intervals.py` (разбор `15m`/`1h`/`1d` и границы), `store.py` (SQLite, синхронный), `report.py` (агрегаты и текст, чистые функции), `service.py` (`set`/`stop`/`status`/`get_report`/`run_due`/`ack`, синхронный SQLite в `asyncio.to_thread`). `tools/watch.py` держит `DESCRIPTION` шести инструментов и тонкие функции к сервису. Сервер пассивен: время считает клиент, а `watch_run_due` выполняет всё, срок чего наступил, и возвращает `next_due_at`.
 
 Изменения поведения инструментов начинаются со спецификации: проект ведётся по OpenSpec (`/opsx:explore`, `/opsx:propose`, `/opsx:apply`, `/opsx:archive`), действующие спецификации лежат в `openspec/specs/`, активные изменения в `openspec/changes/`, завершённые в `openspec/changes/archive/` (там же дизайн и решения первой реализации, `2026-09-25-add-moex-mcp-server`). Расхождение кода и спецификации нужно править в обоих местах.
 
 ## Неочевидное
 
+- **Инструменты расписания без `readOnlyHint`, намеренно**: клиент бота отдаёт модели только инструменты с этим признаком, а `watch_*` принимают `chat_id` извне и меняют хранилище (в том числе `watch_status` и `watch_get_report`). Второй рубеж: без `--watch-db` они не публикуются. Не добавляйте им признак, даже если инструмент ничего не пишет.
+- **Согласованность расписания**: клиент запускает сервер на каждое обращение, процессы пересекаются по одному файлу. `run_due` = заявка (`BEGIN IMMEDIATE`, сдвиг `next_poll_at`) → опрос ISS без транзакции → запись замеров только при прежней `version` (замену или остановку опроса за время опроса замеры выбрасывают) → сводки с повторной проверкой срока внутри транзакции. `version` берётся из счётчика в таблице `meta`, а не `версия + 1`, чтобы остановка и новая постановка не дали прежний номер. Граница периода сводки `window_start` не включительная (при постановке `now - 1`): замер на границе входит ровно в одну сводку.
+- **Тесты расписания**: `tests/watch_helpers.py` (`Env`: сервис на временной БД, `Clock` для сервиса и кэша `IssClient`, `ScriptedExchange` с подменой цен, сбоями тикеров и хуком `on_quote` для событий посреди опроса). Кэш котировок `IssClient` живёт по его часам, поэтому тестам расписания часы передают и в клиент ISS.
 - **`mcp` 2.x, а не 1.x**: `FastMCP` переименован в `MCPServer` (`mcp.server.mcpserver`); поля результатов snake_case (`structured_content`, `is_error`, `input_schema`, `ToolAnnotations(read_only_hint=...)`). В клиентском коде проекта агента поля могут быть camelCase (mcp 1.x), сервер совместим с обоими.
 - **stdout по stdio принадлежит протоколу**: `print` в пакете запрещён (проверяется тестом), логи идут в stderr (`configure_logging`).
 - **Клиент ISS с `trust_env=False`**: на машине разработки задан `ALL_PROXY=socks://…`, который `httpx` не принимает, а ISS доступен напрямую.
