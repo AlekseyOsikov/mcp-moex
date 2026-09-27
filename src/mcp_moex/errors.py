@@ -69,6 +69,118 @@ class InvalidArguments(MoexError):
     """Аргументы инструмента неверны по смыслу (например, начало периода позже конца)."""
 
 
+# --- Анализ переданной истории (moex-price-analytics) -------------------------------------------
+# Каждая ошибка называет параметр, чья история отклонена: клиент должен знать, какую получить заново.
+
+ANALYSIS_INTERVALS = "day, week, month"
+
+
+class HistoryTruncated(MoexError):
+    """В истории свечей меньше, чем за период: сводка учитывает больше, чем видно в свечах."""
+
+    def __init__(self, param: str) -> None:
+        self.param = param
+        super().__init__(
+            f"Параметр {param}: история усечена (candles_truncated = true), считать по неполному ряду нельзя. "
+            'Получите историю через get_price_history с более крупным interval (например, "week" или "month") '
+            "или за более короткий период и повторите вызов."
+        )
+
+
+class IntervalNotSupported(MoexError):
+    """Анализ не поддерживает интервал переданной истории (часовые свечи)."""
+
+    def __init__(self, param: str, interval: str) -> None:
+        self.param = param
+        self.interval = interval
+        super().__init__(
+            f"Параметр {param}: интервал «{interval}» для анализа не поддерживается. "
+            f"Поддерживаются: {ANALYSIS_INTERVALS}. Получите историю через get_price_history с interval = "
+            '"day" (короткие периоды), "week" или "month" и повторите вызов.'
+        )
+
+
+class NoHistoryData(MoexError):
+    """В переданной истории нет свечей."""
+
+    def __init__(self, param: str) -> None:
+        self.param = param
+        super().__init__(
+            f"Параметр {param}: за период нет данных (свечей нет, summary = null). "
+            "Возможно, торгов не было или бумага ещё не торговалась. Получите историю через get_price_history "
+            "за другой период и повторите вызов."
+        )
+
+
+class HistoryInconsistent(MoexError):
+    """Свечи не согласованы со сводкой или сами по себе неверны: история изменена или повреждена."""
+
+    def __init__(self, param: str, detail: str) -> None:
+        self.param = param
+        self.detail = detail
+        super().__init__(
+            f"Параметр {param}: история изменена или повреждена ({detail}). "
+            "Получите историю заново через get_price_history и передайте результат без изменений."
+        )
+
+
+class IntervalMismatch(MoexError):
+    """У двух сравниваемых историй разные интервалы свечей."""
+
+    def __init__(self, param_a: str, interval_a: str, param_b: str, interval_b: str) -> None:
+        super().__init__(
+            f"Интервалы историй различаются: {param_a} = «{interval_a}», {param_b} = «{interval_b}». "
+            "Получите обе истории через get_price_history с одним и тем же interval и повторите вызов."
+        )
+
+
+class BenchmarkMustBeIndex(MoexError):
+    """Эталоном в сравнении с индексом может быть только индекс."""
+
+    def __init__(self, param: str, secid: str, asset_type: str) -> None:
+        self.param = param
+        super().__init__(
+            f"Параметр {param}: эталоном может быть только индекс, а «{secid}» относится к классу «{asset_type}». "
+            "Для сравнения двух бумаг (акций или фондов) между собой используйте compare_securities."
+        )
+
+
+class IndexNotAllowed(MoexError):
+    """В сравнении двух бумаг индекс не допускается."""
+
+    def __init__(self, param: str, secid: str) -> None:
+        self.param = param
+        super().__init__(
+            f"Параметр {param}: «{secid}» это индекс, а compare_securities сравнивает только акции и фонды. "
+            "Для сравнения бумаги с индексом используйте compare_with_benchmark."
+        )
+
+
+class BondNotComparable(MoexError):
+    """Облигации в сравнениях не поддерживаются."""
+
+    def __init__(self, param: str, secid: str) -> None:
+        self.param = param
+        super().__init__(
+            f"Параметр {param}: «{secid}» это облигация, сравнение облигаций не поддерживается. "
+            "Цена облигации выражена в процентах от номинала без накопленного купонного дохода, поэтому изменение "
+            "цены не равно доходу и его нельзя сопоставлять с другими бумагами. "
+            "Метрики одной облигации можно получить через compute_price_metrics."
+        )
+
+
+class TooFewCommonCandles(MoexError):
+    """У двух историй меньше двух общих свечей."""
+
+    def __init__(self, common: int) -> None:
+        self.common = common
+        super().__init__(
+            f"Общий период двух историй слишком короткий: общих свечей {common}, нужно не меньше двух. "
+            "Получите обе истории через get_price_history за более длинный период или с более мелким interval "
+            "и повторите вызов."
+        )
+
+
 class WatchNotSet(MoexError):
     """Для чата не задан опрос цен (режим расписания)."""
 

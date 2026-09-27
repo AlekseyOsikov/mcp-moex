@@ -26,13 +26,34 @@ def test_success_prints_every_step_and_exits_with_zero(capsys):
     code, out, err = run_smoke(capsys)
 
     assert code == 0, err
-    for step in ("initialize", "list_tools", "search_securities", "get_current_price", "get_price_history"):
+    for step in (
+        "initialize",
+        "list_tools",
+        "search_securities",
+        "get_current_price",
+        "get_price_history",
+        "get_price_history (IMOEX)",
+        "get_price_history (GAZP)",
+        "compute_price_metrics",
+        "compare_with_benchmark",
+        "compare_securities",
+    ):
         assert f"== {step} ==" in out
     assert "OK: все шаги выполнены" in out
     assert '"secid": "SBER"' in out
 
 
-@pytest.mark.parametrize("tool", ["search_securities", "get_current_price", "get_price_history"])
+ALL_TOOLS = [
+    "search_securities",
+    "get_current_price",
+    "get_price_history",
+    "compute_price_metrics",
+    "compare_with_benchmark",
+    "compare_securities",
+]
+
+
+@pytest.mark.parametrize("tool", ALL_TOOLS)
 def test_tool_error_fails_the_run_and_names_the_step(capsys, tool):
     code, out, err = run_smoke(capsys, "--fail", tool)
 
@@ -42,12 +63,22 @@ def test_tool_error_fails_the_run_and_names_the_step(capsys, tool):
     assert "OK: все шаги выполнены" not in out
 
 
-def test_missing_tool_fails_the_list_tools_step(capsys):
-    code, out, err = run_smoke(capsys, "--without", "get_price_history")
+@pytest.mark.parametrize("tool", ["get_price_history", "compare_securities"])
+def test_missing_tool_fails_the_list_tools_step(capsys, tool):
+    code, out, err = run_smoke(capsys, "--without", tool)
 
     assert code == 1
     assert "ОШИБКА на шаге «list_tools»" in err
-    assert "get_price_history" in err
+    assert tool in err
+
+
+def test_histories_reach_the_analytics_tools_whole_and_the_right_ones(capsys):
+    code, out, err = run_smoke(capsys)
+
+    assert code == 0, err
+    # фейк принимает параметры в настоящей модели HistoryResult и возвращает тикеры из полученных историй
+    assert '"benchmark_secid": "IMOEX"' in out
+    assert '"a_secid": "SBER"' in out and '"b_secid": "GAZP"' in out
 
 
 def test_unstartable_server_command_fails_and_says_so(capsys):

@@ -196,6 +196,166 @@ class HistoryResult(BaseModel):
     message: str | None = Field(default=None, description="Пояснение, например, что за период нет торгов.")
 
 
+# --- Анализ истории (moex-price-analytics) ------------------------------------------------------
+# Входом служит результат get_price_history целиком, без преобразований.
+
+_HISTORY_HINT = (
+    "результат get_price_history целиком, без изменений (свечи и summary из одного вызова, не усечённые, "
+    "interval day, week или month). Тикер сначала найдите через search_securities."
+)
+
+HistoryParam = Annotated[HistoryResult, Field(description=f"История бумаги: {_HISTORY_HINT}")]
+
+BenchmarkHistoryParam = Annotated[
+    HistoryResult,
+    Field(
+        description=(
+            f"История эталонного индекса (asset_type = index, например IMOEX): {_HISTORY_HINT} "
+            "Получите её с тем же interval, что и history."
+        )
+    ),
+]
+
+HistoryAParam = Annotated[
+    HistoryResult,
+    Field(description=f"История бумаги A (акция или фонд, не индекс и не облигация): {_HISTORY_HINT}"),
+]
+
+HistoryBParam = Annotated[
+    HistoryResult,
+    Field(
+        description=(
+            f"История бумаги B (акция или фонд, не индекс и не облигация): {_HISTORY_HINT} "
+            "Получите её с тем же interval, что и history_a."
+        )
+    ),
+]
+
+
+class Drawdown(BaseModel):
+    depth_pct: float = Field(
+        description="Глубина просадки по ценам закрытия в %, не больше нуля (например, -25.0); 0, если просадки не было."
+    )
+    peak: str | None = Field(description="Начало свечи, на закрытии которой был пик перед просадкой; null без просадки.")
+    trough: str | None = Field(description="Начало свечи, на закрытии которой было дно; null без просадки.")
+    recovered_at: str | None = Field(
+        description="Начало первой свечи, закрытие которой вернулось к пику; null, если цена не восстановилась или просадки не было."
+    )
+
+
+class PeriodChange(BaseModel):
+    begin: str = Field(description="Начало свечи, ISO 8601, +03:00.")
+    change_pct: float = Field(
+        description="Изменение цены за свечу в %: первая свеча от open, остальные от close предыдущей."
+    )
+    partial: bool = Field(description="true: период свечи ещё не завершён (например, текущий месяц).")
+
+
+class BenchmarkPeriod(BaseModel):
+    begin: str = Field(description="Начало общей свечи, ISO 8601, +03:00.")
+    change_pct: float = Field(description="Изменение цены бумаги за период в %.")
+    benchmark_change_pct: float = Field(description="Изменение эталонного индекса за период в %.")
+    difference_pp: float = Field(description="change_pct - benchmark_change_pct, в процентных пунктах.")
+    partial: bool = Field(description="true: период свечи ещё не завершён.")
+
+
+class PairPeriod(BaseModel):
+    begin: str = Field(description="Начало общей свечи, ISO 8601, +03:00.")
+    a_change_pct: float = Field(description="Изменение цены бумаги A за период в %.")
+    b_change_pct: float = Field(description="Изменение цены бумаги B за период в %.")
+    difference_pp: float = Field(description="a_change_pct - b_change_pct, в процентных пунктах.")
+    partial: bool = Field(description="true: период свечи ещё не завершён.")
+
+
+_NOTES = (
+    "Предупреждения на русском (дивиденды и купоны не учтены, незавершённая свеча, возможный сплит, малая "
+    "выборка, суженное окно). Передайте их пользователю вместе с числами."
+)
+_TEXT = "Готовый русский текст итога с числами, замечаниями и оговорками: отправляйте пользователю как есть."
+
+
+class MetricsResult(BaseModel):
+    secid: str = Field(description="Тикер в каноническом написании.")
+    name: str = Field(description="Название бумаги.")
+    asset_type: AssetType = Field(description="Класс: stock, bond, fund или index.")
+    price_unit: str = Field(description="Единица цены: RUB (или код валюты), percent_of_face, points.")
+    interval: Interval = Field(description="Размер свечи.")
+    first_candle: str = Field(description="Начало первой свечи периода расчёта, ISO 8601, +03:00.")
+    last_candle: str = Field(description="Начало последней свечи периода расчёта, ISO 8601, +03:00.")
+    candles_used: int = Field(description="Число свечей в расчёте.")
+    change_pct: float = Field(description="Изменение цены за период в %; совпадает со summary.change_pct истории.")
+    volatility_annualized_pct: float | None = Field(
+        description=(
+            "Годовая волатильность в %: стандартное отклонение изменений между соседними закрытиями, "
+            "приведённое к году; null, если свечей меньше трёх."
+        )
+    )
+    annualization_factor: int = Field(description="Число периодов в году, использованное для приведения (day 252, week 52, month 12).")
+    max_drawdown: Drawdown = Field(description="Максимальная просадка по ценам закрытия.")
+    current_drawdown_pct: float = Field(
+        description="Текущая просадка в %, не больше нуля: от максимального закрытия периода до последнего закрытия."
+    )
+    periods: list[PeriodChange] = Field(description="Изменение цены по каждой свече по возрастанию времени.")
+    notes: list[str] = Field(description=_NOTES)
+    text: str = Field(description=_TEXT)
+
+
+class BenchmarkComparison(BaseModel):
+    secid: str = Field(description="Тикер сравниваемой бумаги.")
+    name: str = Field(description="Название бумаги.")
+    asset_type: AssetType = Field(description="Класс бумаги: stock, fund или index.")
+    price_unit: str = Field(description="Единица цены бумаги.")
+    benchmark_secid: str = Field(description="Тикер эталонного индекса.")
+    benchmark_name: str = Field(description="Название эталонного индекса.")
+    interval: Interval = Field(description="Размер свечи обеих историй.")
+    first_candle: str = Field(description="Начало первой общей свечи, ISO 8601, +03:00.")
+    last_candle: str = Field(description="Начало последней общей свечи, ISO 8601, +03:00.")
+    candles_common: int = Field(description="Число общих свечей, по которым идёт расчёт.")
+    change_pct: float = Field(description="Изменение цены бумаги за общее окно в %.")
+    benchmark_change_pct: float = Field(description="Изменение эталонного индекса за общее окно в %.")
+    difference_pp: float = Field(
+        description="change_pct - benchmark_change_pct в процентных пунктах; больше нуля: бумага опередила индекс."
+    )
+    beta: float | None = Field(
+        description=(
+            "Бета: ковариация изменений бумаги и индекса между соседними закрытиями, делённая на дисперсию индекса; "
+            "null, если изменений меньше трёх или разброс нулевой."
+        )
+    )
+    correlation: float | None = Field(
+        description="Корреляция изменений между соседними закрытиями, от -1 до 1; null при тех же условиях, что и beta."
+    )
+    max_drawdown: Drawdown = Field(description="Максимальная просадка бумаги в общем окне.")
+    benchmark_max_drawdown: Drawdown = Field(description="Максимальная просадка индекса в общем окне.")
+    periods: list[BenchmarkPeriod] = Field(description="Изменения бумаги и индекса по каждой общей свече.")
+    notes: list[str] = Field(description=_NOTES)
+    text: str = Field(description=_TEXT)
+
+
+class PairComparison(BaseModel):
+    a_secid: str = Field(description="Тикер бумаги A (history_a).")
+    a_name: str = Field(description="Название бумаги A.")
+    a_price_unit: str = Field(description="Единица цены бумаги A.")
+    b_secid: str = Field(description="Тикер бумаги B (history_b).")
+    b_name: str = Field(description="Название бумаги B.")
+    b_price_unit: str = Field(description="Единица цены бумаги B.")
+    interval: Interval = Field(description="Размер свечи обеих историй.")
+    first_candle: str = Field(description="Начало первой общей свечи, ISO 8601, +03:00.")
+    last_candle: str = Field(description="Начало последней общей свечи, ISO 8601, +03:00.")
+    candles_common: int = Field(description="Число общих свечей, по которым идёт расчёт.")
+    a_change_pct: float = Field(description="Изменение цены бумаги A за общее окно в %.")
+    b_change_pct: float = Field(description="Изменение цены бумаги B за общее окно в %.")
+    difference_pp: float = Field(description="a_change_pct - b_change_pct в процентных пунктах; больше нуля: A опередила B.")
+    correlation: float | None = Field(
+        description="Корреляция изменений между соседними закрытиями, от -1 до 1; null, если изменений меньше трёх или разброс нулевой."
+    )
+    a_max_drawdown: Drawdown = Field(description="Максимальная просадка A в общем окне.")
+    b_max_drawdown: Drawdown = Field(description="Максимальная просадка B в общем окне.")
+    periods: list[PairPeriod] = Field(description="Изменения A и B по каждой общей свече.")
+    notes: list[str] = Field(description=_NOTES)
+    text: str = Field(description=_TEXT)
+
+
 # --- Режим расписания (moex-price-watch) --------------------------------------------------------
 # Инструменты служебные: их вызывает клиент-планировщик, а не модель.
 

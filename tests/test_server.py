@@ -1,6 +1,7 @@
 """Сервер целиком: клиент MCP SDK подключается к нему в памяти и вызывает инструменты."""
 
 import json
+from datetime import datetime
 
 import httpx
 import jsonschema
@@ -9,11 +10,14 @@ from mcp import Client
 
 from mcp_moex.iss import IssClient
 from mcp_moex.server import create_server
+from mcp_moex.tools.history import MSK
 
-from .fake_iss import RECORD_ENV, FixtureTransport
+from .fake_iss import RECORD_ENV, CountingTransport, FixtureTransport
 from .watch_helpers import Clock
 
-TOOLS = {"search_securities", "get_current_price", "get_price_history"}
+ISS_TOOLS = {"search_securities", "get_current_price", "get_price_history"}
+ANALYTICS_TOOLS = {"compute_price_metrics", "compare_with_benchmark", "compare_securities"}
+TOOLS = ISS_TOOLS | ANALYTICS_TOOLS
 BOND_FIELDS = {"face_value", "currency", "price_rub", "accrued_interest", "dirty_price", "yield_percent"}
 
 CALLS = {
@@ -40,7 +44,7 @@ async def tools_by_name(client: Client) -> dict:
 # --- 8.1 регистрация инструментов -------------------------------------------------------------
 
 
-async def test_list_tools_returns_exactly_the_three_tools():
+async def test_list_tools_returns_exactly_the_six_tools():
     async with connect() as client:
         assert set(await tools_by_name(client)) == TOOLS
 
@@ -102,10 +106,42 @@ async def test_descriptions_state_delay_and_units():
         assert "не скорректированы" in tools["get_price_history"].description
 
 
+async def test_analytics_tools_are_read_only_offline_and_idempotent():
+    async with connect() as client:
+        tools = await tools_by_name(client)
+
+        for name in ANALYTICS_TOOLS:
+            hints = tools[name].annotations
+            assert (hints.read_only_hint, hints.idempotent_hint, hints.open_world_hint) == (True, True, False), name
+
+
+async def test_analytics_schemas_take_the_history_result_and_describe_the_pair_of_calls():
+    async with connect() as client:
+        tools = await tools_by_name(client)
+
+        assert tools["compute_price_metrics"].input_schema["required"] == ["history"]
+        assert set(tools["compare_with_benchmark"].input_schema["required"]) == {"history", "benchmark_history"}
+        assert set(tools["compare_securities"].input_schema["required"]) == {"history_a", "history_b"}
+        history = tools["compute_price_metrics"].input_schema["properties"]["history"]
+        assert "get_price_history" in history["description"] and "без изменений" in history["description"]
+
+
+async def test_analytics_descriptions_point_to_history_and_separate_the_two_comparisons():
+    async with connect() as client:
+        tools = await tools_by_name(client)
+
+        for name in ANALYTICS_TOOLS:
+            assert "get_price_history" in tools[name].description, name
+            assert "search_securities" in tools[name].description, name
+        assert "сравнения с индексом" in tools["compare_with_benchmark"].description
+        assert "compare_with_benchmark" in tools["compare_securities"].description
+        assert "compare_securities" in tools["compare_with_benchmark"].description
+
+
 # --- 8.2 результаты и ошибки ------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("name", sorted(TOOLS))
+@pytest.mark.parametrize("name", sorted(ISS_TOOLS))
 async def test_success_returns_structured_content_and_same_json_text(name):
     async with connect() as client:
         tool = (await tools_by_name(client))[name]
@@ -116,6 +152,98 @@ async def test_success_returns_structured_content_and_same_json_text(name):
         assert result.structured_content
         assert json.loads(result.content[0].text) == result.structured_content
         jsonschema.validate(result.structured_content, tool.output_schema)
+
+
+async def history_of(client: Client, secid: str) -> dict:
+    """Результат get_price_history так, как его получает клиент (structuredContent), для передачи дальше как есть."""
+    result = await client.call_tool("get_price_history", {**CALLS["get_price_history"], "secid": secid})
+    assert result.is_error is False
+    return result.structured_content
+
+
+@pytest.mark.parametrize("name", sorted(ANALYTICS_TOOLS))
+async def test_analytics_success_takes_the_history_from_the_client_unchanged(name):
+    async with connect() as client:
+        tool = (await tools_by_name(client))[name]
+        sber, imoex = await history_of(client, "SBER"), await history_of(client, "IMOEX")
+        arguments = {
+            "compute_price_metrics": {"history": sber},
+            "compare_with_benchmark": {"history": sber, "benchmark_history": imoex},
+            "compare_securities": {"history_a": sber, "history_b": sber},
+        }[name]
+
+        result = await client.call_tool(name, arguments)
+
+        assert result.is_error is False, result.content[0].text
+        assert result.structured_content
+        assert json.loads(result.content[0].text) == result.structured_content
+        jsonschema.validate(result.structured_content, tool.output_schema)
+        assert result.structured_content["text"].endswith("Это не индивидуальная инвестиционная рекомендация.")
+        assert result.structured_content["notes"]
+
+
+async def test_analytics_agree_with_the_history_summary_through_the_client():
+    async with connect() as client:
+        sber = await history_of(client, "SBER")
+
+        metrics = (await client.call_tool("compute_price_metrics", {"history": sber})).structured_content
+
+        assert metrics["change_pct"] == sber["summary"]["change_pct"]
+
+
+async def test_analytics_use_the_server_clock_for_the_unfinished_candle():
+    iss = IssClient(transport=FixtureTransport())
+    for moment, expect_partial in ((datetime(2026, 9, 10, 12, tzinfo=MSK), True), (datetime(2026, 9, 27, 12, tzinfo=MSK), False)):
+        async with Client(create_server(iss, clock=Clock(moment.timestamp()))) as client:
+            sber = await history_of(client, "SBER")
+
+            metrics = (await client.call_tool("compute_price_metrics", {"history": sber})).structured_content
+
+            assert metrics["periods"][-1]["partial"] is expect_partial
+
+
+async def test_analytics_domain_errors_are_tool_errors_with_the_text_for_the_llm():
+    async with connect() as client:
+        sber, imoex = await history_of(client, "SBER"), await history_of(client, "IMOEX")
+
+        not_index = await client.call_tool("compare_with_benchmark", {"history": sber, "benchmark_history": sber})
+        assert not_index.is_error is True
+        assert "compare_securities" in not_index.content[0].text
+
+        index_in_pair = await client.call_tool("compare_securities", {"history_a": sber, "history_b": imoex})
+        assert index_in_pair.is_error is True
+        assert "compare_with_benchmark" in index_in_pair.content[0].text
+
+        truncated = await client.call_tool("compute_price_metrics", {"history": {**sber, "candles_truncated": True}})
+        assert truncated.is_error is True
+        assert '"week"' in truncated.content[0].text
+        assert "Traceback" not in truncated.content[0].text
+
+        damaged = {**sber, "summary": {**sber["summary"], "end_price": sber["summary"]["end_price"] + 1}}
+        result = await client.call_tool("compute_price_metrics", {"history": damaged})
+        assert result.is_error is True
+        assert "заново" in result.content[0].text
+
+
+async def test_analytics_reject_a_malformed_history_naming_the_parameter():
+    async with connect() as client:
+        result = await client.call_tool("compute_price_metrics", {"history": {"secid": "SBER"}})
+
+        assert result.is_error is True
+        assert "history" in result.content[0].text
+
+
+async def test_analytics_make_no_requests_to_the_exchange():
+    transport = CountingTransport()
+    async with Client(create_server(IssClient(transport=transport))) as client:
+        sber, imoex = await history_of(client, "SBER"), await history_of(client, "IMOEX")
+        before = list(transport.paths)
+
+        await client.call_tool("compute_price_metrics", {"history": sber})
+        await client.call_tool("compare_with_benchmark", {"history": sber, "benchmark_history": imoex})
+        await client.call_tool("compare_securities", {"history_a": sber, "history_b": sber})
+
+        assert transport.paths == before
 
 
 async def test_result_has_named_fields_and_no_raw_iss_tables():
@@ -236,7 +364,7 @@ def connect_watch(path, clock=None) -> Client:
     return Client(create_server(IssClient(transport=FixtureTransport()), watch_db=path, clock=clock))
 
 
-async def test_without_the_flag_there_are_exactly_three_tools_and_no_file(tmp_path, monkeypatch):
+async def test_without_the_flag_there_are_exactly_six_tools_and_no_file(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     async with connect() as client:
         assert set(await tools_by_name(client)) == TOOLS
@@ -244,7 +372,7 @@ async def test_without_the_flag_there_are_exactly_three_tools_and_no_file(tmp_pa
     assert list(tmp_path.iterdir()) == []
 
 
-async def test_with_the_flag_there_are_nine_tools_three_read_only_and_six_not(tmp_path):
+async def test_with_the_flag_there_are_twelve_tools_six_read_only_and_six_not(tmp_path):
     async with connect_watch(tmp_path / "watch.db") as client:
         tools = await tools_by_name(client)
 

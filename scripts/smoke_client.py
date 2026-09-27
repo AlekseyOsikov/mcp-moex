@@ -1,8 +1,9 @@
-"""Смоук-клиент: запускает сервер mcp-moex по stdio и вызывает все три инструмента на реальном ISS.
+"""Смоук-клиент: запускает сервер mcp-moex по stdio и вызывает все шесть инструментов на реальном ISS.
 
 Запуск из корня проекта:  uv run python scripts/smoke_client.py
 
 Код возврата 0, если все шаги прошли; иначе 1, а в stderr указан шаг, на котором сбой.
+Истории от get_price_history идут в инструменты анализа дословно, как это делает клиент бота.
 Скрипт же показывает, как подключиться к серверу из проекта агента (см. `connect` и README).
 """
 
@@ -83,7 +84,14 @@ async def run_steps(session: ClientSession) -> None:
         first_line = (tool.description or "").strip().splitlines()[0]
         print(f"- {tool.name}: {first_line}")
     names = {tool.name for tool in tools.tools}
-    expected = {"search_securities", "get_current_price", "get_price_history"}
+    expected = {
+        "search_securities",
+        "get_current_price",
+        "get_price_history",
+        "compute_price_metrics",
+        "compare_with_benchmark",
+        "compare_securities",
+    }
     if names != expected:
         raise StepFailed("list_tools", f"ожидались инструменты {sorted(expected)}, получены {sorted(names)}")
 
@@ -113,6 +121,47 @@ async def run_steps(session: ClientSession) -> None:
     )
     if not history["summary"]:
         raise StepFailed("get_price_history", f"за 30 дней с {date_from} нет свечей по {secid}")
+
+    await run_analytics_steps(session, history, date_from)
+
+
+BENCHMARK_SECID = "IMOEX"
+SECOND_STOCK_SECID = "GAZP"
+
+
+async def run_analytics_steps(session: ClientSession, history: dict[str, Any], date_from: str) -> None:
+    """Метрики и оба сравнения по историям, которые агент получил бы от get_price_history."""
+    benchmark_step = f"get_price_history ({BENCHMARK_SECID})"
+    benchmark = await step(
+        benchmark_step,
+        call_tool(session, "get_price_history", {"secid": BENCHMARK_SECID, "date_from": date_from, "interval": "day"}),
+    )
+    if not benchmark["summary"]:
+        raise StepFailed(benchmark_step, f"за 30 дней с {date_from} нет свечей по {BENCHMARK_SECID}")
+    second_step = f"get_price_history ({SECOND_STOCK_SECID})"
+    second = await step(
+        second_step,
+        call_tool(session, "get_price_history", {"secid": SECOND_STOCK_SECID, "date_from": date_from, "interval": "day"}),
+    )
+    if not second["summary"]:
+        raise StepFailed(second_step, f"за 30 дней с {date_from} нет свечей по {SECOND_STOCK_SECID}")
+
+    metrics = await step("compute_price_metrics", call_tool(session, "compute_price_metrics", {"history": history}))
+    show(metrics)
+    if metrics["change_pct"] != history["summary"]["change_pct"]:
+        raise StepFailed("compute_price_metrics", "change_pct не совпал со summary.change_pct той же истории")
+
+    versus_index = await step(
+        "compare_with_benchmark",
+        call_tool(session, "compare_with_benchmark", {"history": history, "benchmark_history": benchmark}),
+    )
+    show(versus_index)
+
+    versus_stock = await step(
+        "compare_securities",
+        call_tool(session, "compare_securities", {"history_a": history, "history_b": second}),
+    )
+    show(versus_stock)
 
 
 def first_step_failure(group: BaseExceptionGroup) -> StepFailed | None:

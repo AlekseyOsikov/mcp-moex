@@ -159,7 +159,10 @@ def test_stdout_carries_only_protocol_messages_and_diagnostics_go_to_stderr():
         process.stdin.write(rpc(2, "tools/list"))
         process.stdin.flush()
         tools = wait_for_response(2)["result"]["tools"]
-        assert {tool["name"] for tool in tools} == {"search_securities", "get_current_price", "get_price_history"}
+        assert {tool["name"] for tool in tools} == {
+            "search_securities", "get_current_price", "get_price_history",
+            "compute_price_metrics", "compare_with_benchmark", "compare_securities",
+        }  # fmt: skip
 
         # вызов с неверным аргументом: сервер пишет диагностику, в сеть при этом не ходит
         process.stdin.write(rpc(3, "tools/call", {"name": "get_current_price", "arguments": {"secid": "bad ticker"}}))
@@ -232,6 +235,7 @@ def test_watch_mode_over_stdio_keeps_stdout_for_the_protocol_only(tmp_path):
         tools = {tool["name"] for tool in wait_for_response(2)["result"]["tools"]}
         assert tools == {
             "search_securities", "get_current_price", "get_price_history",
+            "compute_price_metrics", "compare_with_benchmark", "compare_securities",
             "watch_set", "watch_stop", "watch_status", "watch_get_report", "watch_run_due", "watch_ack",
         }  # fmt: skip
 

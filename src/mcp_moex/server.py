@@ -6,6 +6,7 @@ import sys
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -17,12 +18,19 @@ from .errors import MoexError
 from .iss import IssClient
 from .models import (
     AckResult,
+    BenchmarkComparison,
+    BenchmarkHistoryParam,
     ChatIdParam,
     DateFromParam,
     DateTillParam,
+    HistoryAParam,
+    HistoryBParam,
+    HistoryParam,
     HistoryResult,
     IntervalParam,
     LimitParam,
+    MetricsResult,
+    PairComparison,
     PollIntervalParam,
     PriceResult,
     QueryParam,
@@ -38,8 +46,9 @@ from .models import (
     WatchStatusResult,
     WatchStopResult,
 )
-from .tools import history, price, search
+from .tools import analytics, history, price, search
 from .tools import watch as watch_tools
+from .tools.history import MSK
 from .watch.service import WatchService
 from .watch.store import WatchStore
 
@@ -52,7 +61,9 @@ DEFAULT_HTTP_PORT = 8000
 INSTRUCTIONS = (
     "Данные Московской биржи (ISS): акции, облигации, фонды, индексы. Порядок работы: если бумага названа "
     "словами или ISIN, найдите тикер через search_securities; затем get_current_price для цены и "
-    "get_price_history для истории. Котировки акций, облигаций и фондов задержаны на 15 минут."
+    "get_price_history для истории. Чтобы посчитать метрики или сравнить бумаги, передайте результаты "
+    "get_price_history без изменений в compute_price_metrics, compare_with_benchmark (с индексом) или "
+    "compare_securities (две бумаги). Котировки акций, облигаций и фондов задержаны на 15 минут."
 )
 
 WATCH_INSTRUCTIONS = (
@@ -62,6 +73,9 @@ WATCH_INSTRUCTIONS = (
 
 READ_ONLY = ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=True)
 """Инструменты чтения только читают публичные данные биржи."""
+
+ANALYTICS = ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=False)
+"""Инструменты анализа считают по переданной истории и не обращаются ни к бирже, ни к файлам."""
 
 # Инструменты расписания НЕ помечены read_only_hint: клиент отдаёт модели только инструменты с этим признаком,
 # а эти принимают chat_id извне и изменяют хранилище (даже watch_status и watch_get_report не для модели).
@@ -88,10 +102,16 @@ def create_server(
     """Собирает сервер. Без `iss` использует настоящий клиент ISS и закрывает его при остановке.
 
     С `watch_db` (путь к файлу SQLite) дополнительно публикует шесть инструментов расписания; без него сервер
-    ровно такой, как раньше: три инструмента чтения и никаких файлов. `clock` (секунды Unix) нужен тестам.
+    публикует шесть инструментов чтения (три с данными биржи и три анализа истории) и не создаёт файлов.
+    `clock` (секунды Unix) нужен тестам: им пользуется расписание и признак незавершённой свечи в анализе.
     """
     client = iss if iss is not None else IssClient()
     owns_client = iss is None
+    now = clock or time.time
+
+    def today() -> date:
+        """Сегодняшняя дата по Москве."""
+        return datetime.fromtimestamp(now(), MSK).date()
 
     @asynccontextmanager
     async def lifespan(_: MCPServer):
@@ -125,8 +145,22 @@ def create_server(
     ) -> HistoryResult:
         return await _guard(history.get_price_history(client, secid, date_from, date_till, interval))
 
+    @server.tool(name="compute_price_metrics", description=analytics.METRICS_DESCRIPTION, annotations=ANALYTICS)
+    async def compute_price_metrics(history: HistoryParam) -> MetricsResult:
+        return await _guard(analytics.compute_price_metrics(history, today()))
+
+    @server.tool(name="compare_with_benchmark", description=analytics.BENCHMARK_DESCRIPTION, annotations=ANALYTICS)
+    async def compare_with_benchmark(
+        history: HistoryParam, benchmark_history: BenchmarkHistoryParam
+    ) -> BenchmarkComparison:
+        return await _guard(analytics.compare_with_benchmark(history, benchmark_history, today()))
+
+    @server.tool(name="compare_securities", description=analytics.SECURITIES_DESCRIPTION, annotations=ANALYTICS)
+    async def compare_securities(history_a: HistoryAParam, history_b: HistoryBParam) -> PairComparison:
+        return await _guard(analytics.compare_securities(history_a, history_b, today()))
+
     if watch_db is not None:
-        _register_watch_tools(server, WatchService(WatchStore(watch_db), client, clock or time.time))
+        _register_watch_tools(server, WatchService(WatchStore(watch_db), client, now))
 
     return server
 

@@ -1,15 +1,20 @@
-"""Крошечный MCP-сервер с теми же тремя инструментами и управляемыми поломками (для тестов смоук-клиента).
+"""Крошечный MCP-сервер с теми же шестью инструментами и управляемыми поломками (для тестов смоук-клиента).
 
 Запуск: python tests/fake_mcp_server.py [--fail ИМЯ_ИНСТРУМЕНТА] [--without ИМЯ_ИНСТРУМЕНТА]
 """
 
 import argparse
+from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
 from mcp_moex.models import (
+    BenchmarkHistoryParam,
     Candle,
+    HistoryAParam,
+    HistoryBParam,
+    HistoryParam,
     HistoryResult,
     HistorySummary,
     PriceResult,
@@ -86,6 +91,27 @@ def get_price_history(secid: str, date_from: str, date_till: str | None = None, 
         candles_returned=1,
         candles_truncated=False,
     )
+
+
+# Инструменты анализа принимают историю в настоящей модели: заглушка проверяет, что клиент передал результат целиком.
+
+
+@register("compute_price_metrics")
+def compute_price_metrics(history: HistoryParam) -> dict[str, Any]:
+    failing("compute_price_metrics")
+    return {"secid": history.secid, "change_pct": history.summary.change_pct, "text": "метрики"}
+
+
+@register("compare_with_benchmark")
+def compare_with_benchmark(history: HistoryParam, benchmark_history: BenchmarkHistoryParam) -> dict[str, Any]:
+    failing("compare_with_benchmark")
+    return {"secid": history.secid, "benchmark_secid": benchmark_history.secid, "difference_pp": 0.0, "text": "сравнение"}
+
+
+@register("compare_securities")
+def compare_securities(history_a: HistoryAParam, history_b: HistoryBParam) -> dict[str, Any]:
+    failing("compare_securities")
+    return {"a_secid": history_a.secid, "b_secid": history_b.secid, "difference_pp": 0.0, "text": "сравнение"}
 
 
 if __name__ == "__main__":
